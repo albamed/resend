@@ -1,0 +1,21 @@
+{
+  "name": "splay-go-support-api",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "nodemon src/index.js",
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "cors": "latest",
+    "dotenv": "latest",
+    "express": "latest",
+    "express-rate-limit": "latest",
+    "helmet": "latest",
+    "nodemailer": "latest",
+    "zod": "latest"
+  },
+  "devDependencies": {
+    "nodemon": "latest"
+  }
+}
