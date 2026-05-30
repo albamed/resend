@@ -12,7 +12,7 @@
     "express": "latest",
     "express-rate-limit": "latest",
     "helmet": "latest",
-    "nodemailer": "latest",
+    "resend": "^6.12.4",
     "zod": "latest"
   },
   "devDependencies": {

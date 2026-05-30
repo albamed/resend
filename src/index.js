@@ -4,23 +4,23 @@ import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import "dotenv/config";
 import { z } from "zod";
-import nodemailer from "nodemailer";
+import { Resend } from "resend";
 
 const app = express();
+
 app.set("trust proxy", 1);
+
 const envSchema = z.object({
     PORT: z.coerce.number().default(3002),
     FRONTEND_URL: z.string().min(1),
     SUPPORT_EMAIL: z.string().email(),
-    SMTP_HOST: z.string().min(1),
-    SMTP_PORT: z.coerce.number().default(587),
-    SMTP_SECURE: z.string().optional(),
-    SMTP_USER: z.string().min(1),
-    SMTP_PASS: z.string().min(1),
+    RESEND_API_KEY: z.string().min(1),
     MAIL_FROM: z.string().min(1),
 });
 
 const env = envSchema.parse(process.env);
+
+const resend = new Resend(env.RESEND_API_KEY);
 
 const allowedOrigins = env.FRONTEND_URL.split(",")
     .map((origin) => origin.trim())
@@ -43,7 +43,7 @@ app.use(
 
             return callback(new Error("Not allowed by CORS"));
         },
-        methods: ["GET", "POST"],
+        methods: ["GET", "POST", "OPTIONS"],
         allowedHeaders: ["Content-Type"],
         maxAge: 86400,
     })
@@ -191,16 +191,6 @@ const supportSchema = z
     })
     .strict();
 
-const transporter = nodemailer.createTransport({
-    host: env.SMTP_HOST,
-    port: env.SMTP_PORT,
-    secure: env.SMTP_SECURE === "true",
-    auth: {
-        user: env.SMTP_USER,
-        pass: env.SMTP_PASS,
-    },
-});
-
 const escapeHtml = (value) => {
     return String(value)
         .replaceAll("&", "&amp;")
@@ -217,7 +207,15 @@ app.get("/", (req, res) => {
     });
 });
 
-app.post("/support", supportLimiter, async (req, res) => {
+app.get("/health", (req, res) => {
+    res.json({
+        ok: true,
+        service: "SPlay GO Support API",
+        uptime: process.uptime(),
+    });
+});
+
+const supportHandler = async (req, res) => {
     const parsed = supportSchema.safeParse(req.body);
 
     if (!parsed.success) {
@@ -251,56 +249,77 @@ app.post("/support", supportLimiter, async (req, res) => {
 
     const mailSubject = `[${tag}] ${subject}`;
 
+    const text = [
+        "Nueva solicitud de soporte de SPlay GO",
+        "",
+        `Nombre: ${name}`,
+        `Correo: ${email}`,
+        `Etiqueta: ${tag}`,
+        `Origen: ${source || "N/A"}`,
+        `Página: ${pageUrl || "N/A"}`,
+        `Navegador: ${userAgent || "N/A"}`,
+        "",
+        "Mensaje:",
+        message,
+    ].join("\n");
+
+    const html = `
+        <div style="font-family: Arial, sans-serif; color: #111827; line-height: 1.6;">
+            <h2 style="margin: 0 0 12px;">Nueva solicitud de soporte de SPlay GO</h2>
+
+            <div style="padding: 12px 16px; background: #f3f4f6; border-radius: 12px; margin-bottom: 16px;">
+                <p><strong>Etiqueta:</strong> ${escapeHtml(tag)}</p>
+                <p><strong>Asunto:</strong> ${escapeHtml(subject)}</p>
+            </div>
+
+            <p><strong>Nombre:</strong> ${escapeHtml(name)}</p>
+            <p><strong>Correo:</strong> ${escapeHtml(email)}</p>
+
+            <hr />
+
+            <h3>Mensaje</h3>
+            <p>${escapeHtml(message).replaceAll("\n", "<br />")}</p>
+
+            <hr />
+
+            <p><strong>Origen:</strong> ${escapeHtml(source || "N/A")}</p>
+            <p><strong>Página:</strong> ${escapeHtml(pageUrl || "N/A")}</p>
+            <p><strong>Navegador:</strong> ${escapeHtml(userAgent || "N/A")}</p>
+        </div>
+    `;
+
     try {
-        const info = await transporter.sendMail({
+        const { data, error } = await resend.emails.send({
             from: env.MAIL_FROM,
             to: env.SUPPORT_EMAIL,
-            replyTo: email,
+            reply_to: email,
             subject: mailSubject,
-            text: [
-                "Nueva solicitud de soporte de SPlay GO",
-                "",
-                `Nombre: ${name}`,
-                `Correo: ${email}`,
-                `Etiqueta: ${tag}`,
-                `Origen: ${source || "N/A"}`,
-                `Página: ${pageUrl || "N/A"}`,
-                `Navegador: ${userAgent || "N/A"}`,
-                "",
-                "Mensaje:",
-                message,
-            ].join("\n"),
-            html: `
-                <div style="font-family: Arial, sans-serif; color: #111827; line-height: 1.6;">
-                    <h2 style="margin: 0 0 12px;">Nueva solicitud de soporte de SPlay GO</h2>
-
-                    <div style="padding: 12px 16px; background: #f3f4f6; border-radius: 12px; margin-bottom: 16px;">
-                        <p><strong>Etiqueta:</strong> ${escapeHtml(tag)}</p>
-                        <p><strong>Asunto:</strong> ${escapeHtml(subject)}</p>
-                    </div>
-
-                    <p><strong>Nombre:</strong> ${escapeHtml(name)}</p>
-                    <p><strong>Correo:</strong> ${escapeHtml(email)}</p>
-
-                    <hr />
-
-                    <h3>Mensaje</h3>
-                    <p>${escapeHtml(message).replaceAll("\n", "<br />")}</p>
-
-                    <hr />
-
-                    <p><strong>Origen:</strong> ${escapeHtml(source || "N/A")}</p>
-                    <p><strong>Página:</strong> ${escapeHtml(pageUrl || "N/A")}</p>
-                    <p><strong>Navegador:</strong> ${escapeHtml(userAgent || "N/A")}</p>
-                </div>
-            `,
+            text,
+            html,
+            tags: [
+                {
+                    name: "source",
+                    value: "support_form",
+                },
+                {
+                    name: "project",
+                    value: "splay_go",
+                },
+            ],
         });
 
+        if (error) {
+            console.error("Resend mail error:", error);
+
+            return res.status(500).json({
+                message: "Could not send support request",
+            });
+        }
+
         console.log("Support mail sent:", {
-            messageId: info.messageId,
-            accepted: info.accepted,
-            rejected: info.rejected,
-            response: info.response,
+            id: data?.id,
+            to: env.SUPPORT_EMAIL,
+            subject: mailSubject,
         });
 
         return res.status(200).json({
@@ -308,13 +327,19 @@ app.post("/support", supportLimiter, async (req, res) => {
             message: "Support request sent",
         });
     } catch (error) {
-        console.error("Support mail error:", error);
+        console.error("Support mail error:", {
+            message: error.message,
+            name: error.name,
+        });
 
         return res.status(500).json({
             message: "Could not send support request",
         });
     }
-});
+};
+
+app.post("/support", supportLimiter, supportHandler);
+app.post("/api/support", supportLimiter, supportHandler);
 
 app.use((err, req, res, next) => {
     if (err.message === "Not allowed by CORS") {
@@ -322,6 +347,8 @@ app.use((err, req, res, next) => {
             message: "Origin not allowed",
         });
     }
+
+    console.error("Unhandled error:", err);
 
     return res.status(500).json({
         message: "Internal server error",
