@@ -7,7 +7,7 @@ import { z } from "zod";
 import nodemailer from "nodemailer";
 
 const app = express();
-
+app.set("trust proxy", 1);
 const envSchema = z.object({
     PORT: z.coerce.number().default(3002),
     FRONTEND_URL: z.string().min(1),
