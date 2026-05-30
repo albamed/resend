@@ -9,7 +9,7 @@ import nodemailer from "nodemailer";
 const app = express();
 
 const envSchema = z.object({
-    PORT: z.coerce.number().default(3001),
+    PORT: z.coerce.number().default(3002),
     FRONTEND_URL: z.string().min(1),
     SUPPORT_EMAIL: z.string().email(),
     SMTP_HOST: z.string().min(1),
@@ -63,6 +63,16 @@ app.use(
     })
 );
 
+const supportLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 3,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: {
+        message: "Demasiadas solicitudes. Inténtalo más tarde.",
+    },
+});
+
 const normalizeSingleLine = (value) => {
     return String(value)
         .replace(/[\r\n]+/g, " ")
@@ -81,7 +91,9 @@ const normalizeMultiline = (value) => {
 };
 
 const hasHeaderInjection = (value) => {
-    return /(?:\r|\n)\s*(?:to|from|cc|bcc|subject|reply-to|content-type|mime-version)\s*:/i.test(value);
+    return /(?:\r|\n)\s*(?:to|from|cc|bcc|subject|reply-to|content-type|mime-version)\s*:/i.test(
+        value
+    );
 };
 
 const hasHighRiskInjection = (value) => {
@@ -89,6 +101,7 @@ const hasHighRiskInjection = (value) => {
         /<\s*\/?\s*(script|iframe|object|embed|link|meta|style|svg|form|input|textarea|button)\b/i,
         /\b(?:javascript|vbscript|data):/i,
         /\bon[a-z]+\s*=/i,
+        /document\.cookie/i,
         /(?:\r|\n)\s*(?:to|from|cc|bcc|subject|reply-to|content-type|mime-version)\s*:/i,
     ];
 
@@ -166,6 +179,15 @@ const supportSchema = z
             .optional(),
 
         userAgent: optionalSafeSingleLine(300),
+
+        website: z
+            .string()
+            .transform(normalizeSingleLine)
+            .pipe(z.string().max(120))
+            .optional()
+            .default(""),
+
+        startedAt: z.number().finite().int().positive().optional(),
     })
     .strict();
 
@@ -195,7 +217,7 @@ app.get("/", (req, res) => {
     });
 });
 
-app.post("/support", async (req, res) => {
+app.post("/support", supportLimiter, async (req, res) => {
     const parsed = supportSchema.safeParse(req.body);
 
     if (!parsed.success) {
@@ -205,21 +227,32 @@ app.post("/support", async (req, res) => {
         });
     }
 
-    const {
-        name,
-        email,
-        subject,
-        message,
-        tag,
-        source,
-        pageUrl,
-        userAgent,
-    } = parsed.data;
+    const now = Date.now();
+
+    if (parsed.data.website) {
+        return res.status(200).json({
+            ok: true,
+            message: "Support request sent",
+        });
+    }
+
+    if (parsed.data.startedAt && now - parsed.data.startedAt < 3000) {
+        return res.status(400).json({
+            message: "Invalid support request",
+            errors: {
+                formErrors: ["El formulario fue enviado demasiado rápido."],
+                fieldErrors: {},
+            },
+        });
+    }
+
+    const { name, email, subject, message, tag, source, pageUrl, userAgent } =
+        parsed.data;
 
     const mailSubject = `[${tag}] ${subject}`;
 
     try {
-        await transporter.sendMail({
+        const info = await transporter.sendMail({
             from: env.MAIL_FROM,
             to: env.SUPPORT_EMAIL,
             replyTo: email,
@@ -261,7 +294,14 @@ app.post("/support", async (req, res) => {
                     <p><strong>Navegador:</strong> ${escapeHtml(userAgent || "N/A")}</p>
                 </div>
             `,
-            });
+        });
+
+        console.log("Support mail sent:", {
+            messageId: info.messageId,
+            accepted: info.accepted,
+            rejected: info.rejected,
+            response: info.response,
+        });
 
         return res.status(200).json({
             ok: true,
